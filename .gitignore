@@ -1,0 +1,53 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.pytype/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+wheels/
+pip-wheel-metadata/
+
+# Coverage and test outputs
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.benchmarks/
+
+# Project runtime artifacts
+logs/
+outputs/
+reports/
+workspace/
+tmp/
+downloads/
+data/
+
+# Environment and secrets
+.env
+.env.*
+
+# Editor/OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+.history/
+
+
