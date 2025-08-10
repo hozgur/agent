@@ -23,9 +23,10 @@ class AgentSettings:
     auto_yes: bool = False
     dry_run: bool = False
     assume_defaults: bool = False
+    verbose: bool = False
 
 
-def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional[str] = None, assume_defaults: bool = False) -> AgentSettings:
+def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional[str] = None, assume_defaults: bool = False, verbose: bool = False) -> AgentSettings:
     load_dotenv(override=False)
 
     root = Path.cwd()
@@ -61,6 +62,7 @@ def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional
         auto_yes=auto_yes,
         dry_run=dry_run,
         assume_defaults=effective_assume_defaults,
+        verbose=verbose,
     )
 
 

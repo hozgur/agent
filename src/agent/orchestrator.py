@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 import json
 import logging
-import re
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -16,7 +16,7 @@ from .tools.python_exec import PythonExecTool
 from .tools.packages import PackagesTool
 from .tools.db import DBTool, QueryRequest
 from .tools.web import WebTool
-from .utils import chunk_text, sanitize_filename
+from .utils import sanitize_filename, chunk_text, write_text
 
 
 USER_INSTRUCTION_SYSTEM = (
@@ -68,160 +68,78 @@ class Orchestrator:
         steps: List[StepRecord] = []
         artifacts: List[Path] = []
 
-        # Direct handling: create a python script named X to Y [and run it]
+        # URL intent: fetch → extract → summarize → report (per ARCHITECTURE.md)
         try:
-            m = re.search(r"create\s+a\s+python\s+script\s+named\s+([A-Za-z0-9_./-]+\.py)\s+to\s+(.+)", goal, re.IGNORECASE)
-            if m:
-                filename = m.group(1)
-                # Normalize to be relative to workspace root if user prefixed with 'workspace/'
-                try:
-                    from pathlib import Path as _P
-                    _fp = _P(filename)
-                    if _fp.parts and _fp.parts[0] == "workspace":
-                        filename = str(_P(*_fp.parts[1:])) or filename
-                except Exception:
-                    pass
-                task_text = m.group(2).strip()
-                task_text = re.sub(r"\s+and\s+run\s+it\.?$", "", task_text, flags=re.IGNORECASE).strip()
-
-                code: Optional[str] = None
-
-                # First, ask the LLM to generate the full script using function calling (preferred), fallback to JSON
-                try:
-                    fc_system = (
-                        "You are a Python code generator. Use the provided function to return the script. "
-                        "Constraints: Python 3.11, stdlib only, no interactive input, print clear output to stdout."
+            if self.ctx.settings.verbose:
+                self.ctx.logger.info(f"[step] detect-intent: scanning goal for URL")
+            url_match = re.search(r"https?://\S+", goal)
+            if url_match:
+                url = url_match.group(0)
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info(f"[step] web.fetch: {url}")
+                fetch_res = self.web.fetch(url, dry_run=self.ctx.settings.dry_run)
+                steps.append(
+                    StepRecord(
+                        name="web.fetch",
+                        command=f"GET {url}",
+                        exit_code=fetch_res.exit_code,
+                        stdout_path=None,
+                        stderr_path=None,
+                        success=fetch_res.ok,
+                        notes=(fetch_res.stdout or fetch_res.stderr),
                     )
-                    tools = [
-                        {
-                            "type": "function",
-                            "function": {
-                                "name": "generate_python_script",
-                                "description": "Generate a complete, runnable Python 3.11 script using stdlib only. Return code and notes.",
-                                "parameters": {
-                                    "type": "object",
-                                    "properties": {
-                                        "code": {"type": "string"},
-                                        "notes": {"type": "string"}
-                                    },
-                                    "required": ["code"]
-                                }
-                            }
-                        }
-                    ]
-                    user = f"Task: {task_text}"
-                    _, tool_calls = self.ctx.llm.chat_with_tools(fc_system, user, tools=tools, tool_choice={"type": "function", "function": {"name": "generate_python_script"}}, max_tokens=1800)
-                    if tool_calls:
-                        try:
-                            args = json.loads(tool_calls[0]["function"]["arguments"] or "{}")
-                            candidate = (args.get("code") or "").strip()
-                            if candidate:
-                                code = candidate
-                        except Exception:
-                            pass
-                    if code is None:
-                        system = (
-                            "You are a Python code generator. Return JSON with keys: code (string, full runnable Python 3.11 script), "
-                            "notes (string). Use only stdlib; no interactive input. Print clear output to stdout."
-                        )
-                        user_json = (
-                            f'Task: {task_text}\n'
-                            'Respond ONLY with a JSON object: {"code": <string>, "notes": <string>}'
-                        )
-                        obj = self.ctx.llm.complete_json(system, user_json, max_tokens=1800)
-                        candidate = (obj.get("code") or "").strip()
-                        if candidate:
-                            code = candidate
-                except Exception:
-                    pass
-
-                # If no code yet, retry with a stricter instruction to force code output
-                if code is None:
-                    try:
-                        system_retry = (
-                            "You are a Python code generator. Output ONLY runnable Python 3.11 code, no backticks, no explanations. "
-                            "Prefer stdlib; do not use third-party packages. Print results to stdout."
-                        )
-                        user_retry = f"Task: {task_text}\nReturn only code."
-                        resp2 = self.ctx.llm.complete(system_retry, user_retry, max_tokens=1500)
-                        fence_match2 = re.search(r"```(?:python)?\n([\s\S]*?)```", resp2, flags=re.IGNORECASE)
-                        code = fence_match2.group(1).strip() if fence_match2 else resp2.strip()
-                        # Reject obviously non-code
-                        if not ("import" in code or "def " in code or "print(" in code):
-                            code = None
-                    except Exception:
-                        code = None
-
-                if code is not None:
-                    created_path = self.ctx.settings.workspace_dir / filename
-                    if not self.ctx.settings.dry_run:
-                        created_path.parent.mkdir(parents=True, exist_ok=True)
-                        created_path.write_text(code, encoding="utf-8")
-                    steps.append(StepRecord(name="file.create", command=f"write {created_path}", exit_code=0, stdout_path=None, stderr_path=None, success=True))
-                    artifacts.append(created_path)
-
-                    rel_path = created_path.relative_to(self.ctx.settings.workspace_dir)
-                    res = self.shell.run(f"python3 {rel_path}", dry_run=self.ctx.settings.dry_run)
-                    steps.append(
-                        StepRecord(
-                            name="shell.run",
-                            command=f"python3 {rel_path}",
-                            exit_code=res.exit_code,
-                            stdout_path=Path(res.extra["stdout_path"]) if res.extra and "stdout_path" in res.extra else None,
-                            stderr_path=Path(res.extra["stderr_path"]) if res.extra and "stderr_path" in res.extra else None,
-                            success=res.ok,
-                            notes=res.stdout,
-                        )
-                    )
-                    # Auto-fix and retry on failure or suspicious output (e.g., HTTP errors)
-                    suspicious = (res.stdout or "").lower()
-                    needs_fix = (not res.ok) or any(k in suspicious for k in ["http error", "bad request", "traceback", "exception", "failed", "error:"])
-                    if needs_fix and not self.ctx.settings.dry_run:
-                        try:
-                            original_code = created_path.read_text(encoding="utf-8")
-                            fixer_system = (
-                                "You are a Python code fixer. Return JSON with keys: code (string, full corrected Python 3.11 script), notes (string).\n"
-                                "Constraints: stdlib only, add timeouts, set a User-Agent for HTTP, use json.load where appropriate, no interactive input."
-                            )
-                            fixer_user = (
-                                f'Task intent: {task_text}\n'
-                                f'Error stderr:\n{res.stderr}\n\n'
-                                'Original code:\n' + original_code + '\n'
-                                'Respond ONLY with a JSON object: {"code": <string>, "notes": <string>}'
-                            )
-                            obj = self.ctx.llm.complete_json(fixer_system, fixer_user, max_tokens=1800)
-                            fixed_code = (obj.get("code") or "").strip()
-                            if fixed_code and fixed_code != original_code:
-                                created_path.write_text(fixed_code, encoding="utf-8")
-                                steps.append(StepRecord(name="file.update", command=f"write {created_path}", exit_code=0, stdout_path=None, stderr_path=None, success=True))
-                                res = self.shell.run(f"python3 {rel_path}", dry_run=self.ctx.settings.dry_run)
-                                steps.append(
-                                    StepRecord(
-                                        name="shell.run",
-                                        command=f"python3 {rel_path}",
-                                        exit_code=res.exit_code,
-                                        stdout_path=Path(res.extra["stdout_path"]) if res.extra and "stdout_path" in res.extra else None,
-                                        stderr_path=Path(res.extra["stderr_path"]) if res.extra and "stderr_path" in res.extra else None,
-                                        success=res.ok,
-                                        notes=res.stdout,
-                                    )
-                                )
-                        except Exception:
-                            pass
+                )
+                if not fetch_res.ok:
+                    raise RuntimeError(fetch_res.stderr or "Fetch failed")
+                if self.ctx.settings.dry_run:
                     finished = datetime.utcnow()
-                    report = generate_markdown_report("Script Task", goal, steps, artifacts, started, finished)
-                    report_path = save_report(self.ctx.settings.reports_dir, "script_task", report)
-                    msg = res.stdout if res.ok and (res.stdout or "").strip() else (res.stderr or "Failed")
-                    return res.ok, steps, artifacts + [report_path], msg
-        except Exception as e:
-            self.ctx.logger.exception("Direct script task error")
-            finished = datetime.utcnow()
-            report = generate_markdown_report("Task Failed", goal, steps, artifacts, started, finished)
-            report_path = save_report(self.ctx.settings.reports_dir, "task_failed", report)
-            return False, steps, artifacts + [report_path], str(e)
+                    report = generate_markdown_report("Web Fetch (dry run)", goal, steps, artifacts, started, finished)
+                    report_path = save_report(self.ctx.settings.reports_dir, "web_fetch_dry_run", report)
+                    return True, steps, artifacts + [report_path], "Planned web fetch"
 
-        # Zero-heuristics: Always have the LLM generate and run a Python script for the goal
+                assert fetch_res.artifact_path is not None
+                html_path = Path(fetch_res.artifact_path)
+                artifacts.append(html_path)
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info(f"[step] web.extract-text: {html_path}")
+                html = html_path.read_text(encoding="utf-8", errors="ignore")
+                text = self.web.extract_text(html)
+
+                summary: str
+                if self.ctx.settings.openai_api_key:
+                    if self.ctx.settings.verbose:
+                        self.ctx.logger.info("[step] summarize: chunk + LLM summarize")
+                    chunks = chunk_text(text, chunk_size=6000, overlap=200)
+                    summary = self.ctx.llm.summarize_chunks(
+                        "Summarize the fetched page into concise bullet points (10-15 bullets).",
+                        chunks,
+                        max_tokens=600,
+                    )
+                else:
+                    if self.ctx.settings.verbose:
+                        self.ctx.logger.info("[step] summarize: LLM unavailable, writing preview")
+                    summary = "LLM not configured. Showing first 1000 characters of extracted text.\n\n" + text[:1000]
+
+                summary_path = self.ctx.settings.outputs_dir / "web_summary.md"
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info(f"[step] write: {summary_path}")
+                write_text(summary_path, summary)
+                artifacts.append(summary_path)
+
+                finished = datetime.utcnow()
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info("[step] report: generate + save")
+                report = generate_markdown_report("Web Fetch & Summary", goal, steps, artifacts, started, finished)
+                report_path = save_report(self.ctx.settings.reports_dir, "web_fetch_summary", report)
+                msg = "Summary written to " + str(summary_path)
+                return True, steps, artifacts + [report_path], msg
+        except Exception as web_exc:
+            self.ctx.logger.warning(f"Web path failed, falling back to codegen: {web_exc}")
+
+        # Zero-heuristics fallback: generate and run a Python script for the goal
         try:
+            if self.ctx.settings.verbose:
+                self.ctx.logger.info("[step] codegen: request script via function calling")
             # Prefer function calling for structured output; fallback to JSON mode
             fc_system = (
                 "You are a Python code generator. Use the provided function to return the script. "
@@ -254,6 +172,8 @@ class Orchestrator:
                 except Exception:
                     code = None
             if not code:
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info("[step] codegen: fallback JSON mode")
                 system = (
                     "You are a Python code generator. Return JSON with keys: code (string, full runnable Python 3.11 script), "
                     "notes (string). Use only stdlib; no interactive input. Print clear output to stdout."
@@ -272,12 +192,16 @@ class Orchestrator:
                 base += ".py"
             created_path = self.ctx.settings.workspace_dir / base
             if not self.ctx.settings.dry_run:
+                if self.ctx.settings.verbose:
+                    self.ctx.logger.info(f"[step] write: {created_path}")
                 created_path.parent.mkdir(parents=True, exist_ok=True)
                 created_path.write_text(code, encoding="utf-8")
             steps.append(StepRecord(name="file.create", command=f"write {created_path}", exit_code=0, stdout_path=None, stderr_path=None, success=True))
             artifacts.append(created_path)
 
             rel_path = created_path.relative_to(self.ctx.settings.workspace_dir)
+            if self.ctx.settings.verbose:
+                self.ctx.logger.info(f"[step] run: python3 {rel_path}")
             res = self.shell.run(f"python3 {rel_path}", dry_run=self.ctx.settings.dry_run)
             steps.append(
                 StepRecord(
@@ -291,18 +215,38 @@ class Orchestrator:
                 )
             )
             # Auto-fix and retry on failure or suspicious output (e.g., HTTP errors)
-            suspicious = (res.stdout or "").lower()
-            needs_fix = (not res.ok) or any(k in suspicious for k in ["http error", "bad request", "traceback", "exception", "failed", "error:"])
+            suspicious_text = f"{res.stdout or ''}\n{res.stderr or ''}".lower()
+            needs_fix = (not res.ok) or any(k in suspicious_text for k in [
+                "http error",
+                "bad request",
+                "traceback",
+                "exception",
+                "failed",
+                "error",
+                "timeout",
+                "timed out",
+                "connection error",
+                "refused",
+                "not found",
+                "module not found",
+                "nameerror",
+                "typeerror",
+                "valueerror",
+            ])
             if needs_fix and not self.ctx.settings.dry_run:
                 try:
                     original_code = created_path.read_text(encoding="utf-8")
+                    if self.ctx.settings.verbose:
+                        self.ctx.logger.info("[step] fix: request auto-fix + rerun")
                     fixer_system = (
                         "You are a Python code fixer. Return JSON with keys: code (string, full corrected Python 3.11 script), notes (string).\n"
                         "Constraints: stdlib only, add timeouts, set a User-Agent for HTTP, use json.load where appropriate, no interactive input."
                     )
                     fixer_user = (
                         f'Goal: {goal}\n'
-                        f'Error stderr:\n{res.stderr}\n\n'
+                        f'Exit code: {res.exit_code}\n'
+                        f'Stdout:\n{res.stdout}\n\n'
+                        f'Stderr:\n{res.stderr}\n\n'
                         'Original code:\n' + original_code + '\n'
                         'Respond ONLY with a JSON object: {"code": <string>, "notes": <string>}'
                     )

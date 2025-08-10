@@ -17,13 +17,14 @@ app = typer.Typer(add_completion=False, help="Natural language automation agent"
 @app.command()
 def do(
     goal: str = typer.Argument(..., help="Natural language goal in quotes"),
-    auto_yes: bool = typer.Option(False, "--auto-yes", help="Auto-confirm risky actions"),
+    auto_yes: bool = typer.Option(True, "--auto-yes/--no-auto-yes", help="Auto-confirm risky actions (default: enabled)"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Show plan and commands without executing"),
     model: Optional[str] = typer.Option(None, "--model", help="Override OpenAI model"),
     assume_defaults: bool = typer.Option(True, "--assume-defaults/--no-assume-defaults", help="Skip clarifying questions by applying safe defaults"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Print one-line step updates while running"),
 ):
     try:
-        settings = load_settings(auto_yes=auto_yes, dry_run=dry_run, model=model, assume_defaults=assume_defaults)
+        settings = load_settings(auto_yes=auto_yes, dry_run=dry_run, model=model, assume_defaults=assume_defaults, verbose=verbose)
     except Exception as e:
         typer.secho(str(e), fg=typer.colors.RED)
         raise typer.Exit(code=1)
