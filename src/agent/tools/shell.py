@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -10,7 +10,7 @@ from .base import BaseTool, ToolResult
 
 class ShellTool(BaseTool):
     def run(self, command: str, cwd: Optional[Path] = None, env: Optional[dict] = None, dry_run: bool = False) -> ToolResult:
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         stdout_path = self.logs_dir / f"stdout_{timestamp}.log"
         stderr_path = self.logs_dir / f"stderr_{timestamp}.log"
 

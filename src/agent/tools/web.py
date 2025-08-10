@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +17,7 @@ class WebTool(BaseTool):
         headers = {"User-Agent": user_agent or "natural-agent/0.1"}
         r = httpx.get(url, headers=headers, timeout=timeout, follow_redirects=True)
         r.raise_for_status()
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         out_path = self.outputs_dir / f"download_{timestamp}.html"
         out_path.write_text(r.text, encoding="utf-8")
         return ToolResult(ok=True, stdout=str(out_path), stderr="", exit_code=0, artifact_path=out_path)

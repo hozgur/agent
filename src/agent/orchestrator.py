@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import re
 import json
 import logging
@@ -64,7 +64,7 @@ class Orchestrator:
         return plan
 
     def execute(self, goal: str) -> Tuple[bool, List[StepRecord], List[Path], str]:
-        started = datetime.utcnow()
+        started = datetime.now(timezone.utc)
         steps: List[StepRecord] = []
         artifacts: List[Path] = []
 
@@ -92,7 +92,7 @@ class Orchestrator:
                 if not fetch_res.ok:
                     raise RuntimeError(fetch_res.stderr or "Fetch failed")
                 if self.ctx.settings.dry_run:
-                    finished = datetime.utcnow()
+                    finished = datetime.now(timezone.utc)
                     report = generate_markdown_report("Web Fetch (dry run)", goal, steps, artifacts, started, finished)
                     report_path = save_report(self.ctx.settings.reports_dir, "web_fetch_dry_run", report)
                     return True, steps, artifacts + [report_path], "Planned web fetch"
@@ -126,7 +126,7 @@ class Orchestrator:
                 write_text(summary_path, summary)
                 artifacts.append(summary_path)
 
-                finished = datetime.utcnow()
+                finished = datetime.now(timezone.utc)
                 if self.ctx.settings.verbose:
                     self.ctx.logger.info("[step] report: generate + save")
                 report = generate_markdown_report("Web Fetch & Summary", goal, steps, artifacts, started, finished)
@@ -269,14 +269,14 @@ class Orchestrator:
                         )
                 except Exception:
                     pass
-            finished = datetime.utcnow()
+            finished = datetime.now(timezone.utc)
             report = generate_markdown_report("LLM Script Task", goal, steps, artifacts, started, finished)
             report_path = save_report(self.ctx.settings.reports_dir, "llm_script_task", report)
             msg = res.stdout if res.ok and (res.stdout or "").strip() else (res.stderr or "Failed")
             return res.ok, steps, artifacts + [report_path], msg
         except Exception as e:
             self.ctx.logger.exception("Execution error")
-            finished = datetime.utcnow()
+            finished = datetime.now(timezone.utc)
             report = generate_markdown_report("Task Failed", goal, steps, artifacts, started, finished)
             report_path = save_report(self.ctx.settings.reports_dir, "task_failed", report)
             return False, steps, artifacts + [report_path], str(e)

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -56,7 +56,7 @@ def generate_markdown_report(
 
 
 def save_report(reports_dir: Path, title: str, content: str) -> Path:
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     fname = sanitize_filename(f"{timestamp}_{title}") + ".md"
     path = reports_dir / fname
     write_text(path, content)

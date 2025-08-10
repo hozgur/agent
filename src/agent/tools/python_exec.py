@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -10,7 +10,7 @@ from .base import BaseTool, ToolResult
 
 class PythonExecTool(BaseTool):
     def run_script(self, code: str, tmp_dir: Path, dry_run: bool = False) -> ToolResult:
-        timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         script_path = tmp_dir / f"script_{timestamp}.py"
         stdout_path = self.logs_dir / f"py_stdout_{timestamp}.log"
         stderr_path = self.logs_dir / f"py_stderr_{timestamp}.log"
