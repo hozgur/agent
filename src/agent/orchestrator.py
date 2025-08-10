@@ -6,7 +6,7 @@ import re
 import json
 import logging
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from .config import AgentSettings
 from .llm import LLMClient
@@ -65,10 +65,11 @@ class Orchestrator:
         plan = self.ctx.llm.complete(USER_INSTRUCTION_SYSTEM, prompt, max_tokens=400)
         return plan
 
-    def execute(self, goal: str) -> Tuple[bool, List[StepRecord], List[Path], str]:
+    def execute(self, goal: str, plan_context: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[StepRecord], List[Path], str]:
         started = datetime.now(timezone.utc)
         steps: List[StepRecord] = []
         artifacts: List[Path] = []
+        plan_context = plan_context or {"artifacts": [], "variables": {}, "notes": []}
 
         # If depth > 1, use iterative planner
         if self.ctx.settings.depth and self.ctx.settings.depth > 1:
@@ -153,7 +154,8 @@ class Orchestrator:
             # Prefer function calling for structured output; fallback to JSON mode
             fc_system = (
                 "You are a Python code generator. Use the provided function to return the script. "
-                "Constraints: Python 3.11, stdlib only, no interactive input, print clear output to stdout."
+                "Constraints: Python 3.11, stdlib only, no interactive input, print clear output to stdout. "
+                "If a context is provided, use artifacts/variables in context where helpful."
             )
             tools = [
                 {
@@ -172,7 +174,18 @@ class Orchestrator:
                     }
                 }
             ]
-            user = f"Task: {goal}"
+            # Prepare a concise context blurb
+            ctx_artifacts = [str(p) for p in plan_context.get("artifacts", [])]
+            ctx_vars = plan_context.get("variables", {})
+            ctx_notes = plan_context.get("notes", [])[-5:]
+            context_blurb = (
+                ("Context artifacts:\n" + "\n".join(ctx_artifacts) + "\n") if ctx_artifacts else ""
+            ) + (
+                ("Context variables:\n" + json.dumps(ctx_vars) + "\n") if ctx_vars else ""
+            ) + (
+                ("Recent notes:\n" + "\n".join(ctx_notes) + "\n") if ctx_notes else ""
+            )
+            user = ("Task: " + goal + ("\n\n" + context_blurb if context_blurb else "")).strip()
             _, tool_calls = self.ctx.llm.chat_with_tools(fc_system, user, tools=tools, tool_choice={"type": "function", "function": {"name": "generate_python_script"}}, max_tokens=1800)
             code = None
             if tool_calls:
@@ -186,11 +199,20 @@ class Orchestrator:
                     self.ctx.logger.info("[step] codegen: fallback JSON mode")
                 system = (
                     "You are a Python code generator. Return JSON with keys: code (string, full runnable Python 3.11 script), "
-                    "notes (string). Use only stdlib; no interactive input. Print clear output to stdout."
+                    "notes (string). Use only stdlib; no interactive input. Print clear output to stdout. If a context is provided, "
+                    "use files and variables from it."
                 )
+                context_json = {
+                    "task": goal,
+                    "context": {
+                        "artifacts": ctx_artifacts,
+                        "variables": ctx_vars,
+                        "notes": ctx_notes,
+                        "context_json_path": str(self.ctx.settings.workspace_dir / "context.json"),
+                    },
+                }
                 user_json = (
-                    f'Task: {goal}\n'
-                    'Respond ONLY with a JSON object: {"code": <string>, "notes": <string>}'
+                    json.dumps(context_json) + "\nRespond ONLY with a JSON object: {\"code\": <string>, \"notes\": <string>}"
                 )
                 obj = self.ctx.llm.complete_json(system, user_json, max_tokens=1800)
                 code = (obj.get("code") or "").strip()
@@ -202,6 +224,16 @@ class Orchestrator:
                 base += ".py"
             created_path = self.ctx.settings.workspace_dir / base
             if not self.ctx.settings.dry_run:
+                # Write context.json for scripts to read if needed
+                try:
+                    context_payload = {
+                        "artifacts": ctx_artifacts,
+                        "variables": ctx_vars,
+                        "notes": ctx_notes,
+                    }
+                    write_text(self.ctx.settings.workspace_dir / "context.json", json.dumps(context_payload, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
                 if self.ctx.settings.verbose:
                     self.ctx.logger.info(f"[step] write: {created_path}")
                 created_path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,6 +352,7 @@ class IterativePlanner:
         all_steps: List[StepRecord] = []
         all_artifacts: List[Path] = []
         current_plan: List[str] = []
+        plan_context: Dict[str, Any] = {"artifacts": [], "variables": {}, "notes": []}
         summary_msg = ""
 
         def log_step(msg: str) -> None:
@@ -347,10 +380,14 @@ class IterativePlanner:
             while idx < len(current_plan):
                 task = current_plan[idx]
                 log_step(f"do: [{idx+1}/{len(current_plan)}] {task}")
-                ok, steps, artifacts, msg = self.orch.execute(task) if idx == -1 else self._execute_atomic(task)
+                ok, steps, artifacts, msg = self._execute_atomic(task, plan_context)
                 # Note: Avoid infinite recursion by using a minimal atomic executor for each task
                 all_steps.extend(steps)
                 all_artifacts.extend(artifacts)
+                # Update shared plan context with new artifacts and notes
+                plan_context["artifacts"].extend([str(p) for p in artifacts])
+                if msg:
+                    plan_context["notes"].append(str(msg)[:500])
                 summary_msg = msg
                 if ok:
                     log_step("verify: OK")
@@ -408,7 +445,7 @@ class IterativePlanner:
 
         return True, all_steps, all_artifacts, summary_msg or "Completed iterative plan"
 
-    def _execute_atomic(self, task: str) -> Tuple[bool, List[StepRecord], List[Path], str]:
+    def _execute_atomic(self, task: str, plan_context: Dict[str, Any]) -> Tuple[bool, List[StepRecord], List[Path], str]:
         """Execute a single task with minimal heuristics to avoid recursion.
 
         Strategy: if task contains a URL → use web path of orchestrator. Otherwise delegate to codegen.
@@ -419,7 +456,7 @@ class IterativePlanner:
         original_depth = self.orch.ctx.settings.depth
         try:
             self.orch.ctx.settings.depth = 1
-            return Orchestrator.execute(self.orch, task)
+            return Orchestrator.execute(self.orch, task, plan_context=plan_context)
         finally:
             self.orch.ctx.settings.depth = original_depth
 
