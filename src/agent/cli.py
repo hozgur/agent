@@ -22,9 +22,10 @@ def do(
     model: Optional[str] = typer.Option(None, "--model", help="Override OpenAI model"),
     assume_defaults: bool = typer.Option(True, "--assume-defaults/--no-assume-defaults", help="Skip clarifying questions by applying safe defaults"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Print one-line step updates while running"),
+    depth: int = typer.Option(1, "--depth", min=1, max=25, help="Plan depth: number of iterative passes for complex tasks"),
 ):
     try:
-        settings = load_settings(auto_yes=auto_yes, dry_run=dry_run, model=model, assume_defaults=assume_defaults, verbose=verbose)
+        settings = load_settings(auto_yes=auto_yes, dry_run=dry_run, model=model, assume_defaults=assume_defaults, verbose=verbose, depth=depth)
     except Exception as e:
         typer.secho(str(e), fg=typer.colors.RED)
         raise typer.Exit(code=1)

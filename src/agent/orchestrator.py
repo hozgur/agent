@@ -39,6 +39,8 @@ class Orchestrator:
         self.packages = PackagesTool(ctx.settings.workspace_dir, ctx.settings.outputs_dir, ctx.settings.logs_dir)
         self.db = DBTool(ctx.settings.workspace_dir, ctx.settings.outputs_dir, ctx.settings.logs_dir)
         self.web = WebTool(ctx.settings.workspace_dir, ctx.settings.outputs_dir, ctx.settings.logs_dir)
+        # Iterative planner is injected lazily to avoid circulars
+        self._iter_planner: Optional["IterativePlanner"] = None
 
     def ask_missing_parameters(self, goal: str) -> Optional[List[str]]:
         questions_prompt = (
@@ -67,6 +69,14 @@ class Orchestrator:
         started = datetime.now(timezone.utc)
         steps: List[StepRecord] = []
         artifacts: List[Path] = []
+
+        # If depth > 1, use iterative planner
+        if self.ctx.settings.depth and self.ctx.settings.depth > 1:
+            if self.ctx.settings.verbose:
+                self.ctx.logger.info(f"[step] iterative: starting depth={self.ctx.settings.depth}")
+            if self._iter_planner is None:
+                self._iter_planner = IterativePlanner(self)
+            return self._iter_planner.run(goal, max_passes=self.ctx.settings.depth)
 
         # URL intent: fetch → extract → summarize → report (per ARCHITECTURE.md)
         try:
@@ -281,4 +291,126 @@ class Orchestrator:
             report_path = save_report(self.ctx.settings.reports_dir, "task_failed", report)
             return False, steps, artifacts + [report_path], str(e)
 
+
+
+class IterativePlanner:
+    """Plan → execute → verify loop with rollback and dynamic task list updates.
+
+    High level:
+      1. Generate or refine a plan (list of tasks) via LLM (or heuristic fallback).
+      2. Execute tasks in order, verifying after each.
+      3. If a task fails and fix requires reordering or modifying another task, update the plan.
+      4. Roll back impacted tasks if possible, then re-run.
+    """
+
+    def __init__(self, orchestrator: Orchestrator) -> None:
+        self.orch = orchestrator
+
+    def run(self, goal: str, max_passes: int = 3) -> Tuple[bool, List[StepRecord], List[Path], str]:
+        ctx = self.orch.ctx
+        all_steps: List[StepRecord] = []
+        all_artifacts: List[Path] = []
+        current_plan: List[str] = []
+        summary_msg = ""
+
+        def log_step(msg: str) -> None:
+            if ctx.settings.verbose:
+                ctx.logger.info(f"[iter] {msg}")
+
+        for loop_idx in range(1, max_passes + 1):
+            log_step(f"planning pass {loop_idx}/{max_passes}")
+
+            # Ask LLM for a concise, actionable task list
+            plan_json = self.orch.ctx.llm.complete_json(
+                "You are a senior planner. Return JSON with keys: tasks (array of strings)",
+                f"Goal: {goal}\nReturn only: {{\"tasks\": [\"...\"]}}",
+                max_tokens=600,
+            ) if ctx.settings.openai_api_key else {"tasks": []}
+            tasks: List[str] = [t for t in (plan_json.get("tasks") or []) if isinstance(t, str)]
+            if not tasks:
+                # Fallback: single task equals the goal
+                tasks = [goal]
+            current_plan = tasks
+            log_step(f"tasks: {len(tasks)} queued")
+
+            # Execute tasks sequentially
+            idx = 0
+            while idx < len(current_plan):
+                task = current_plan[idx]
+                log_step(f"do: [{idx+1}/{len(current_plan)}] {task}")
+                ok, steps, artifacts, msg = self.orch.execute(task) if idx == -1 else self._execute_atomic(task)
+                # Note: Avoid infinite recursion by using a minimal atomic executor for each task
+                all_steps.extend(steps)
+                all_artifacts.extend(artifacts)
+                summary_msg = msg
+                if ok:
+                    log_step("verify: OK")
+                    idx += 1
+                    continue
+
+                # On failure, ask LLM for corrective action (reorder, modify, rollback)
+                log_step("verify: FAIL → analyze & update plan")
+                fix = self.orch.ctx.llm.complete_json(
+                    "You are a repair planner. Return JSON with keys: action (enum: insert_before, insert_after, replace, remove, rollback), task (string), position (int optional)",
+                    (
+                        "Given the goal and current plan, the failed task and error message, propose a minimal corrective action.\n"
+                        f"Goal: {goal}\n"
+                        f"Plan: {current_plan}\n"
+                        f"FailedTask: {task}\n"
+                        f"Message: {msg}\n"
+                        "Return only JSON."
+                    ),
+                    max_tokens=600,
+                ) if ctx.settings.openai_api_key else {"action": "replace", "task": task}
+
+                action = (fix.get("action") or "").lower()
+                new_task = fix.get("task") or task
+                position = fix.get("position")
+
+                # Simple plan mutation strategies
+                if action == "insert_before" and isinstance(position, int):
+                    current_plan.insert(max(0, position), new_task)
+                elif action == "insert_after" and isinstance(position, int):
+                    current_plan.insert(min(len(current_plan), position + 1), new_task)
+                elif action == "replace":
+                    current_plan[idx] = new_task
+                elif action == "remove":
+                    current_plan.pop(idx)
+                    # do not advance idx; next task now occupies current index
+                    continue
+                elif action == "rollback":
+                    # naive rollback: step back one successful task if any
+                    if idx > 0:
+                        idx -= 1
+                        log_step("rollback: stepping back one task")
+                    else:
+                        # cannot rollback; replace the failing task
+                        current_plan[idx] = new_task
+                else:
+                    # default: replace
+                    current_plan[idx] = new_task
+
+                # Re-attempt current index after plan mutation
+                log_step(f"plan-updated: action={action}")
+
+            # If loop finished without early failures that stopped progress, break
+            log_step("pass complete")
+            break
+
+        return True, all_steps, all_artifacts, summary_msg or "Completed iterative plan"
+
+    def _execute_atomic(self, task: str) -> Tuple[bool, List[StepRecord], List[Path], str]:
+        """Execute a single task with minimal heuristics to avoid recursion.
+
+        Strategy: if task contains a URL → use web path of orchestrator. Otherwise delegate to codegen.
+        """
+        if self.orch.ctx.settings.verbose:
+            self.orch.ctx.logger.info(f"[iter] atomic: {task}")
+        # Temporarily bypass iterative planner by forcing depth=1
+        original_depth = self.orch.ctx.settings.depth
+        try:
+            self.orch.ctx.settings.depth = 1
+            return Orchestrator.execute(self.orch, task)
+        finally:
+            self.orch.ctx.settings.depth = original_depth
 
