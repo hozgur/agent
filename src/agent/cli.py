@@ -33,6 +33,9 @@ def do(
     ctx = ExecutionContext(settings=settings, llm=llm, logger=logger)
     orch = Orchestrator(ctx)
 
+    # Show current model
+    typer.echo(f"Model: {settings.openai_model}")
+
     ok, steps, artifacts, msg = orch.execute(goal)
     color = typer.colors.GREEN if ok else typer.colors.RED
     typer.secho(msg, fg=color)
@@ -51,11 +54,12 @@ def repl(model: Optional[str] = typer.Option(None, "--model", help="Override Ope
         typer.secho(str(e), fg=typer.colors.RED)
         raise typer.Exit(code=1)
     logger = setup_logger(settings.logs_dir)
-    llm = LLMClient(settings.openai_api_key, settings.openai_model if model is None else model, settings.openai_base_url)
+    active_model = settings.openai_model if model is None else model
+    llm = LLMClient(settings.openai_api_key, active_model, settings.openai_base_url)
     ctx = ExecutionContext(settings=settings, llm=llm, logger=logger)
     orch = Orchestrator(ctx)
 
-    typer.echo("Interactive REPL. Type your goal. Empty line to exit.")
+    typer.echo(f"Interactive REPL (Model: {active_model}). Type your goal. Empty line to exit.")
     while True:
         try:
             goal = typer.prompt("Goal")
@@ -76,3 +80,5 @@ def main():
     app()
 
 
+if __name__ == "__main__":
+    main()
