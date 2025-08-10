@@ -25,9 +25,10 @@ class AgentSettings:
     assume_defaults: bool = False
     verbose: bool = False
     depth: int = 1
+    script_timeout_sec: int = 120
 
 
-def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional[str] = None, assume_defaults: bool = False, verbose: bool = False, depth: int = 1) -> AgentSettings:
+def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional[str] = None, assume_defaults: bool = False, verbose: bool = False, depth: int = 1, script_timeout_sec: int = 120) -> AgentSettings:
     load_dotenv(override=False)
 
     root = Path.cwd()
@@ -65,6 +66,7 @@ def load_settings(auto_yes: bool = False, dry_run: bool = False, model: Optional
         assume_defaults=effective_assume_defaults,
         verbose=verbose,
         depth=max(1, int(depth or 1)),
+        script_timeout_sec=max(1, int(script_timeout_sec or 120)),
     )
 
 

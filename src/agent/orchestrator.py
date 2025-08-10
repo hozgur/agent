@@ -212,7 +212,12 @@ class Orchestrator:
             rel_path = created_path.relative_to(self.ctx.settings.workspace_dir)
             if self.ctx.settings.verbose:
                 self.ctx.logger.info(f"[step] run: python3 {rel_path}")
-            res = self.shell.run(f"python3 {rel_path}", dry_run=self.ctx.settings.dry_run)
+            # Use configured timeout for scripts to prevent freezing indefinitely
+            res = self.shell.run(
+                f"python3 {rel_path}",
+                dry_run=self.ctx.settings.dry_run,
+                timeout_sec=float(self.ctx.settings.script_timeout_sec),
+            )
             steps.append(
                 StepRecord(
                     name="shell.run",
@@ -265,7 +270,11 @@ class Orchestrator:
                     if fixed_code and fixed_code != original_code:
                         created_path.write_text(fixed_code, encoding="utf-8")
                         steps.append(StepRecord(name="file.update", command=f"write {created_path}", exit_code=0, stdout_path=None, stderr_path=None, success=True))
-                        res = self.shell.run(f"python3 {rel_path}", dry_run=self.ctx.settings.dry_run)
+                        res = self.shell.run(
+                            f"python3 {rel_path}",
+                            dry_run=self.ctx.settings.dry_run,
+                            timeout_sec=float(self.ctx.settings.script_timeout_sec),
+                        )
                         steps.append(
                             StepRecord(
                                 name="shell.run",

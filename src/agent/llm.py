@@ -6,9 +6,10 @@ from openai import OpenAI
 
 
 class LLMClient:
-    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None) -> None:
+    def __init__(self, api_key: str, model: str, base_url: Optional[str] = None, timeout_sec: Optional[float] = 45.0) -> None:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model = model
+        self.timeout_sec = timeout_sec
 
     def _is_gpt5(self) -> bool:
         model_name = (self.model or "").lower()
@@ -43,6 +44,7 @@ class LLMClient:
             ],
             **token_kwargs,
             **temp_kwargs,
+            timeout=self.timeout_sec,
         )
         return response.choices[0].message.content or ""
 
@@ -73,6 +75,7 @@ class LLMClient:
                 response_format={"type": "json_object"},
                 **token_kwargs,
                 **temp_kwargs,
+                timeout=self.timeout_sec,
             )
             content = response.choices[0].message.content or "{}"
         except Exception:
@@ -113,6 +116,7 @@ class LLMClient:
             tool_choice=tool_choice,
             **token_kwargs,
             **temp_kwargs,
+            timeout=self.timeout_sec,
         )
         msg = response.choices[0].message
         tool_calls = msg.tool_calls or []
