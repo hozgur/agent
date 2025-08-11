@@ -32,7 +32,7 @@ def do(
         raise typer.Exit(code=1)
 
     logger = setup_logger(settings.logs_dir)
-    llm = LLMClient(settings.openai_api_key, settings.openai_model, settings.openai_base_url)
+    llm = LLMClient(settings.openai_api_key, settings.openai_model, settings.openai_base_url, logs_dir=settings.logs_dir)
     ctx = ExecutionContext(settings=settings, llm=llm, logger=logger)
     orch = Orchestrator(ctx)
 
@@ -58,7 +58,7 @@ def repl(model: Optional[str] = typer.Option(None, "--model", help="Override Ope
         raise typer.Exit(code=1)
     logger = setup_logger(settings.logs_dir)
     active_model = settings.openai_model if model is None else model
-    llm = LLMClient(settings.openai_api_key, active_model, settings.openai_base_url)
+    llm = LLMClient(settings.openai_api_key, active_model, settings.openai_base_url, logs_dir=settings.logs_dir)
     ctx = ExecutionContext(settings=settings, llm=llm, logger=logger)
     orch = Orchestrator(ctx)
 
